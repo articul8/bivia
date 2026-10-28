@@ -2,14 +2,14 @@
 
 <p>
   <a href="https://app.articul8.ai/registration?source=bivia&code=bivia"><img alt="Get an API key" src="https://img.shields.io/badge/Get_an_API_key-0A66C2?style=for-the-badge"></a>
-  <a href="https://api-docs.app.articul8.ai/bivia"><img alt="Read the docs" src="https://img.shields.io/badge/Read_the_docs-2EA44F?style=for-the-badge"></a>
+  <a href="https://docs.articul8.ai/bivia"><img alt="Read the docs" src="https://img.shields.io/badge/Read_the_docs-2EA44F?style=for-the-badge"></a>
 </p>
 
 Bivia is a **calibrated decision engine** by [Articul8 AI](https://articul8.ai/?utm_source=github&utm_medium=readme&utm_campaign=bivia&utm_content=intro). Ask a question with context — text, images, audio, documents, or signals — and get back a **typed, structured answer** with a probability distribution and honest abstention when the model isn't confident enough.
 
 No free-form text. No guessing. Just decisions you can act on.
 
-**[Get your API key →](https://app.articul8.ai/registration?source=bivia&code=bivia)** &nbsp;·&nbsp; **[Read the docs →](https://api-docs.app.articul8.ai/bivia)**
+**[Get your API key →](https://app.articul8.ai/registration?source=bivia&code=bivia)** &nbsp;·&nbsp; **[Read the docs →](https://docs.articul8.ai/bivia)**
 
 ## What makes Bivia different
 
@@ -47,7 +47,7 @@ curl -s https://api.articul8.ai/bivia/boolean \
 }
 ```
 
-**Next:** browse every endpoint, parameter, and response in the **[API docs](https://api-docs.app.articul8.ai/bivia)**, run the ready-made scripts in [`examples/curl`](examples/curl), or try an end-to-end recipe in the **[Cookbook](cookbooks)**.
+**Next:** browse every endpoint, parameter, and response in the **[API docs](https://docs.articul8.ai/bivia)**, run the ready-made scripts in [`examples/curl`](examples/curl), or try an end-to-end recipe in the **[Cookbook](cookbooks)**.
 
 ## Cookbook
 
@@ -128,7 +128,7 @@ fmt.Println(result.Value, result.Probability)  // "yes" 0.92
 | `POST /ds` | Decision over profiled numeric signals |
 | `POST /v1/systemone` | Multiple named typed answers in a single batch call |
 
-Request and response schemas for each endpoint are in the **[API docs](https://api-docs.app.articul8.ai/bivia)**.
+Request and response schemas for each endpoint are in the **[API docs](https://docs.articul8.ai/bivia)**.
 
 ## Abstention
 
@@ -164,7 +164,7 @@ result = client.decisions.choice(
 
 ## Documentation
 
-**[api-docs.app.articul8.ai/bivia](https://api-docs.app.articul8.ai/bivia)** — the full Bivia API reference.
+**[docs.articul8.ai/bivia](https://docs.articul8.ai/bivia)** — the full Bivia API reference.
 
 - OpenAPI spec: [`openapi.yaml`](openapi.yaml)
 - curl examples for every endpoint: [`examples/curl`](examples/curl)
@@ -176,7 +176,7 @@ The current model is **`dec-1`** (Bivia foundation decision model). Discover ava
 
 ## Get started
 
-Ready to build? **[Sign up](https://app.articul8.ai/registration?source=bivia&code=bivia)** to get your API key, or read the [docs](https://api-docs.app.articul8.ai/bivia).
+Ready to build? **[Sign up](https://app.articul8.ai/registration?source=bivia&code=bivia)** to get your API key, or read the [docs](https://docs.articul8.ai/bivia).
 
 Questions? Email [support@articul8.ai](mailto:support@articul8.ai).
 
