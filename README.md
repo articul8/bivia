@@ -47,7 +47,22 @@ curl -s https://api.articul8.ai/bivia/boolean \
 }
 ```
 
-**Next:** browse every endpoint, parameter, and response in the **[API docs](https://api-docs.app.articul8.ai/bivia)**, or run the ready-made scripts in [`examples/curl`](examples/curl).
+**Next:** browse every endpoint, parameter, and response in the **[API docs](https://api-docs.app.articul8.ai/bivia)**, run the ready-made scripts in [`examples/curl`](examples/curl), or try an end-to-end recipe in the **[Cookbook](cookbooks)**.
+
+## Cookbook
+
+Runnable recipes with sample inputs, in Python and curl. See [`cookbooks/`](cookbooks) for all of them.
+
+| Recipe | What it shows |
+|---|---|
+| [Find the moment in a video](cookbooks/01-every-modality/video-find-the-moment) | When something is visible, or starts, in a whole video file |
+| [Box the damage in a photo](cookbooks/01-every-modality/image-box-the-damage) | Labelled bounding boxes in an image |
+| [Quote it verbatim](cookbooks/01-every-modality/span-quote-it-verbatim) | The exact words that answer a question, with character offsets |
+| [Ask a French PDF in French](cookbooks/01-every-modality/french-pdf) | Questions over a PDF in any language |
+| [Read a raw sensor signal](cookbooks/01-every-modality/sensor-signal-patterns) | Patterns in raw numeric readings |
+| [Supplier dispute](cookbooks/02-evidence-changes-the-decision/supplier-dispute) | One question per input across video, documents, images and signals, chained into one decision |
+| [Insurance claim flips with one new record](cookbooks/02-evidence-changes-the-decision/claim-flips-with-new-record) | Abstain, fetch more evidence, ask again |
+| [Is the vendor sanctioned?](cookbooks/03-knowing-when-to-abstain/vendor-sanctions-check) | Route the checks Bivia can't settle to a human |
 
 ## SDKs
 
@@ -153,6 +168,7 @@ result = client.decisions.choice(
 
 - OpenAPI spec: [`openapi.yaml`](openapi.yaml)
 - curl examples for every endpoint: [`examples/curl`](examples/curl)
+- End-to-end recipes: [`cookbooks`](cookbooks)
 
 ## Model
 
