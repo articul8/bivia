@@ -1,0 +1,1818 @@
+openapi: 3.1.0
+info:
+  title: Bivia API
+  version: 1.0.0
+  description: |
+    The Bivia API provides calibrated, typed decisions with confidence scores and
+    evidence — not free-form text. Ask a question with context (text, images, audio,
+    documents, or signals), and get back a structured answer: yes/no, pick-one,
+    numeric score, multi-select, or text span — each with a probability distribution
+    and an honest abstention when the model isn't confident enough.
+
+    ## Decision types
+
+    | Endpoint | What it returns |
+    |---|---|
+    | `POST /boolean` | `yes` or `no` with P(value) |
+    | `POST /choice`  | One label from your list, with distribution |
+    | `POST /decide`  | Auto-detects the best type from the question |
+    | `POST /score`   | A number on your scale, with per-level mass |
+    | `POST /set`     | Zero or more labels (multi-select) |
+    | `POST /span`    | Character offsets into the input text |
+    | `POST /ground`  | Bounding boxes in an image |
+
+    ## Key concepts
+
+    - **Calibrated** — probabilities are meaningful, not just softmax scores.
+    - **Abstention** — when the model is unsure, `status` is `abstained` and `value`
+      is `null`. This is a feature: you always know whether to trust the answer.
+    - **Multimodal** — attach text (`state`), images, documents, audio, or raw signals.
+      The decision is made over whatever you provide.
+    - **Evidence** — responses include `evidence.spans` with character offsets back
+      into the input, so you can trace the reasoning.
+    - **Typed and chainable** — every answer has a machine-readable type and value,
+      ready to drive downstream logic without parsing.
+
+    ## Modes
+
+    - **`fast`** (default) — single-pass inference. Lowest latency.
+    - **`deep`** — adds a verification step. Higher confidence on hard questions,
+      at the cost of extra latency.
+
+    ## Model
+
+    The current model is **`dec-1`** (Bivia foundation decision model). The model
+    identifier is returned in every response and can be discovered via `GET /v1/models`.
+  contact:
+    name: Articul8 AI
+    url: https://articul8.ai
+  license:
+    name: Proprietary
+    url: https://articul8.ai/eula
+
+servers:
+  - url: https://api.articul8.ai/bivia
+    description: Production gateway
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Decisions
+    description: |
+      Core decision primitives. Each endpoint takes a question with optional context
+      and returns a typed, calibrated answer. Use the specific type endpoint when you
+      know what kind of answer you want, or `POST /decide` to let the model auto-detect.
+  - name: Grounding
+    description: |
+      Visual grounding — locate objects or events in images and video. Returns bounding
+      boxes with coordinates normalized to `[0, 1000]`.
+  - name: Batch
+    description: |
+      Ask multiple typed questions against the same context in a single request.
+      Each question is independently typed (boolean, choice, score, set, or box) and
+      independently answered.
+  - name: Data Science
+    description: |
+      Decisions over raw numeric signals. The server profiles the signal and folds
+      the analysis into context before deciding.
+  - name: Models
+    description: Model discovery and capability introspection.
+
+x-stainless-config:
+  package-name:
+    python: bivia
+    node: "@articul8/bivia"
+    go: github.com/articul8/bivia-go
+    rust: bivia
+
+paths:
+  # ── Decisions ──────────────────────────────────────────────────
+
+  /boolean:
+    post:
+      tags: [Decisions]
+      operationId: createBooleanDecision
+      summary: Yes / no decision
+      description: |
+        Returns `yes` or `no` with a calibrated probability. `probability` is P(value),
+        not always P(yes) — if the answer is `no`, then `probability` is P(no).
+
+        The `distribution` object always contains both `yes` and `no` keys summing to 1.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BooleanRequest"
+            examples:
+              text_only:
+                summary: Text question
+                value:
+                  state: I was double-charged and support never replied.
+                  question: Is this urgent?
+              with_image:
+                summary: Question about an image
+                value:
+                  question: Does the image show a damaged product?
+                  images:
+                    - url: https://example.com/product-photo.jpg
+              with_document:
+                summary: Question about a document
+                value:
+                  question: Does this contract contain an auto-renewal clause?
+                  documents:
+                    - url: https://example.com/contract.pdf
+      responses:
+        "200":
+          description: 'Decision envelope with `type: "boolean"`.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CategoricalDecision"
+              examples:
+                answered:
+                  summary: Confident answer
+                  value:
+                    type: boolean
+                    value: "no"
+                    probability: 0.94
+                    distribution:
+                      "yes": 0.06
+                      "no": 0.94
+                    status: answered
+                    abstain_reason: null
+                    mode: fast
+                    think_allowed: false
+                    thought: false
+                    grounded: true
+                    verification:
+                      performed: false
+                      result: not_applicable
+                    evidence:
+                      spans: []
+                    latency_ms: 90.0
+                    model: dec-1
+                    input_tokens: 245
+                    billable_tokens: 1000
+                abstained:
+                  summary: Model abstains (not confident enough)
+                  value:
+                    type: boolean
+                    value: null
+                    distribution:
+                      "yes": 0.52
+                      "no": 0.48
+                    status: abstained
+                    abstain_reason: low_confidence
+                    mode: fast
+                    think_allowed: true
+                    thought: false
+                    grounded: true
+                    verification:
+                      performed: false
+                      result: not_applicable
+                    evidence:
+                      spans: []
+                    latency_ms: 85.0
+                    model: dec-1
+                    input_tokens: 245
+                    billable_tokens: 1000
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "503":
+          $ref: "#/components/responses/Overloaded"
+
+  /choice:
+    post:
+      tags: [Decisions]
+      operationId: createChoiceDecision
+      summary: Pick one from a list
+      description: |
+        Selects the best option from your `choices` list. Returns the chosen label,
+        P(choice), and the full distribution over all options.
+
+        At least 2 choices are required. More than 26 is rejected (422).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChoiceRequest"
+            examples:
+              text_only:
+                summary: Classify a support ticket
+                value:
+                  state: I am NOT asking for a refund, I only need a copy of my invoice.
+                  question: Which team handles this?
+                  choices: [billing, refunds, technical]
+              with_image:
+                summary: Classify from an image
+                value:
+                  question: Which team name is printed in the image?
+                  choices: [BILLING, TECHNICAL]
+                  images:
+                    - url: https://example.com/label.png
+      responses:
+        "200":
+          description: 'Decision envelope with `type: "choice"`.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CategoricalDecision"
+              example:
+                type: choice
+                value: billing
+                probability: 0.93
+                distribution:
+                  billing: 0.93
+                  refunds: 0.04
+                  technical: 0.03
+                status: answered
+                abstain_reason: null
+                mode: fast
+                think_allowed: true
+                thought: false
+                grounded: true
+                verification:
+                  performed: false
+                  result: not_applicable
+                evidence:
+                  spans: []
+                latency_ms: 110.0
+                model: dec-1
+                input_tokens: 320
+                billable_tokens: 1000
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "503":
+          $ref: "#/components/responses/Overloaded"
+
+  /decide:
+    post:
+      tags: [Decisions]
+      operationId: createDecision
+      summary: Auto-detect decision type
+      description: |
+        Analyzes the question and automatically selects the best decision type
+        (boolean, choice, score, etc.) and extracts options when applicable.
+
+        Use this when you don't know the answer type in advance. The response
+        `type` field tells you which type was selected.
+
+        Provide `outcomes` to constrain the options; otherwise the model infers
+        them from the question text. At least 2 outcomes are required when provided.
+        More than 26 is rejected (422).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DecideRequest"
+            examples:
+              with_outcomes:
+                summary: Explicit outcomes
+                value:
+                  state: Patient has fever, cough, and a right lower lobe infiltrate on chest x-ray.
+                  question: Most likely diagnosis?
+                  outcomes: [common cold, pneumonia, healthy]
+              auto_detect:
+                summary: Let the model infer type and options
+                value:
+                  state: The quarterly revenue was $4.2M, up 15% from last quarter.
+                  question: Is this a good quarter?
+      responses:
+        "200":
+          description: |
+            Decision envelope. The `type` field indicates which decision type was selected
+            (`decide`, `boolean`, `choice`, `score`, etc.).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CategoricalDecision"
+              examples:
+                answered:
+                  summary: Confident answer
+                  value:
+                    type: decide
+                    value: pneumonia
+                    probability: 0.99
+                    distribution:
+                      common cold: 0.01
+                      pneumonia: 0.99
+                      healthy: 0.0
+                    status: answered
+                    abstain_reason: null
+                    mode: fast
+                    think_allowed: false
+                    thought: false
+                    grounded: true
+                    verification:
+                      performed: false
+                      result: not_applicable
+                    evidence:
+                      spans: []
+                    latency_ms: 110.0
+                    model: dec-1
+                    input_tokens: 380
+                    billable_tokens: 1000
+                abstained:
+                  summary: Model abstains
+                  value:
+                    type: decide
+                    value: null
+                    distribution:
+                      common cold: 0.4
+                      pneumonia: 0.35
+                      healthy: 0.25
+                    status: abstained
+                    abstain_reason: low_confidence
+                    mode: fast
+                    think_allowed: true
+                    thought: false
+                    grounded: true
+                    verification:
+                      performed: false
+                      result: not_applicable
+                    evidence:
+                      spans: []
+                    latency_ms: 110.0
+                    model: dec-1
+                    input_tokens: 380
+                    billable_tokens: 1000
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "503":
+          $ref: "#/components/responses/Overloaded"
+
+  /score:
+    post:
+      tags: [Decisions]
+      operationId: createScoreDecision
+      summary: Numeric score on a scale
+      description: |
+        Returns the expected value on a numeric scale defined by `range` (default
+        `[0, 1]`), divided into `buckets` evenly spaced levels (default 11). The
+        `levels` object shows the probability mass at each level.
+
+        There is no single `probability` field for scores; instead, the full
+        distribution is in `levels`. `buckets` must be at least 2.
+
+        If the question text does not already name both range endpoints, the server
+        appends "Answer on a numeric scale from {lo} to {hi}." so the model sees the
+        scale.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ScoreRequest"
+            examples:
+              urgency:
+                summary: Urgency score 0–1
+                value:
+                  state: Customer threatened to cancel today.
+                  question: How urgent is this (0=none, 1=critical)?
+                  range: [0, 1]
+                  buckets: 11
+              ten_point:
+                summary: Rating on a 0–10 scale
+                value:
+                  state: The restaurant had great food but terrible service.
+                  question: Overall dining experience?
+                  range: [0, 10]
+                  buckets: 11
+      responses:
+        "200":
+          description: 'Decision envelope with `type: "score"`.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScoreDecision"
+              example:
+                type: score
+                value: 0.7
+                levels:
+                  "0": 0.02
+                  "0.1": 0.03
+                  "0.2": 0.05
+                  "0.3": 0.05
+                  "0.4": 0.05
+                  "0.5": 0.1
+                  "0.6": 0.15
+                  "0.7": 0.2
+                  "0.8": 0.15
+                  "0.9": 0.1
+                  "1": 0.1
+                status: answered
+                abstain_reason: null
+                mode: fast
+                think_allowed: false
+                thought: false
+                grounded: true
+                verification:
+                  performed: false
+                  result: not_applicable
+                evidence:
+                  spans: []
+                latency_ms: 95.0
+                model: dec-1
+                input_tokens: 290
+                billable_tokens: 1000
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "503":
+          $ref: "#/components/responses/Overloaded"
+
+  /set:
+    post:
+      tags: [Decisions]
+      operationId: createSetDecision
+      summary: Multi-select from a list
+      description: |
+        Independent yes/no probability per option (not a distribution that sums to 1).
+        `value` contains every option whose probability is at least 0.5, in request
+        order. The `probabilities` map shows the independent P(applies) for each option.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetRequest"
+            example:
+              state: Order arrived damaged and the customer wants money back.
+              question: Which actions apply?
+              options: [cancel, refund, status]
+      responses:
+        "200":
+          description: 'Decision envelope with `type: "set"`.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SetDecision"
+              example:
+                type: set
+                value: [cancel, refund]
+                probabilities:
+                  cancel: 0.93
+                  refund: 0.87
+                  status: 0.11
+                status: answered
+                abstain_reason: null
+                mode: fast
+                think_allowed: true
+                thought: false
+                grounded: true
+                verification:
+                  performed: false
+                  result: not_applicable
+                evidence:
+                  spans: []
+                latency_ms: 450.0
+                model: dec-1
+                input_tokens: 310
+                billable_tokens: 1000
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "503":
+          $ref: "#/components/responses/Overloaded"
+
+  /span:
+    post:
+      tags: [Decisions]
+      operationId: createSpanDecision
+      summary: Locate text spans in the input
+      description: |
+        Returns character offset ranges into `state` that answer the question.
+        `value` is an array of `{start, end, text}` objects, where `text` is the
+        quoted substring from the input.
+
+        `/span` always runs in fast mode. Sending `mode: "deep"` or `think: true`
+        is rejected (422).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SpanRequest"
+            example:
+              state: This agreement renews automatically for one year unless either party cancels.
+              question: Where is the auto-renewal clause?
+      responses:
+        "200":
+          description: 'Decision envelope with `type: "span"`.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SpanDecision"
+              example:
+                type: span
+                value:
+                  - start: 0
+                    end: 78
+                    text: This agreement renews automatically for one year unless either party cancels.
+                status: answered
+                abstain_reason: null
+                mode: fast
+                think_allowed: false
+                thought: false
+                grounded: true
+                verification:
+                  performed: false
+                  result: not_applicable
+                evidence:
+                  spans:
+                    - start: 0
+                      end: 78
+                      text: This agreement renews automatically for one year unless either party cancels.
+                latency_ms: 80.0
+                model: dec-1
+                input_tokens: 220
+                billable_tokens: 1000
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "503":
+          $ref: "#/components/responses/Overloaded"
+
+  # ── Grounding ──────────────────────────────────────────────────
+
+  /ground:
+    post:
+      tags: [Grounding]
+      operationId: createGroundingDecision
+      summary: Visual grounding — locate objects in images
+      description: |
+        Open-vocabulary visual grounding. Finds objects matching `question` in the
+        provided image(s) and returns bounding boxes.
+
+        `value` is an array of `{label, box: [x1, y1, x2, y2]}` where coordinates
+        are normalized to `[0, 1000]`. Returns an empty array when nothing is found.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GroundRequest"
+            examples:
+              by_url:
+                summary: Image by URL
+                value:
+                  question: the invoice total
+                  images:
+                    - url: https://example.com/invoice.png
+              by_base64:
+                summary: Image by base64
+                value:
+                  question: the red square
+                  images:
+                    - b64: "<base64-encoded PNG bytes>"
+                      mime: image/png
+      responses:
+        "200":
+          description: 'Grounding envelope with `type: "ground"`.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GroundDecision"
+              example:
+                type: ground
+                value:
+                  - label: the red square
+                    box: [562, 250, 875, 562]
+                    score: 0.981
+                count: 1
+                found: true
+                grounded: true
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "503":
+          $ref: "#/components/responses/Overloaded"
+
+  /ground/video:
+    post:
+      tags: [Grounding]
+      operationId: createVideoGroundingDecision
+      summary: Video grounding — locate objects or events in video
+      description: |
+        Scans a video clip for objects or events matching `query`.
+
+        - `kind: "object"` — returns temporal intervals where the object appears,
+          with optional per-frame bounding boxes (the spatio-temporal tube).
+        - `kind: "event"` — returns the onset timestamp of a happening.
+
+        Maximum clip size is 200 MB.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VideoScanRequest"
+            example:
+              video:
+                url: https://example.com/clip.mp4
+              query: the red car
+              kind: object
+              coarse_step: 2.0
+              fine_resolution: 0.5
+      responses:
+        "200":
+          description: Video grounding result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VideoGroundDecision"
+              example:
+                type: video_ground
+                kind: object
+                duration_s: 10.0
+                hits:
+                  - start: 2.0
+                    end: 6.5
+                    peak_t: 4.0
+                    confidence: 0.95
+                    boxes:
+                      - label: the red car
+                        box: [200, 300, 600, 700]
+                        score: 0.95
+                input_tokens: 4800
+                image_tokens: 3840
+                billable_tokens: 4800
+        "400":
+          description: Invalid video reference, private URL, or undecodable clip.
+        "413":
+          description: Clip exceeds size limit (200 MB).
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "503":
+          description: Video decoder unavailable, or server overloaded.
+
+  # ── Data Science ───────────────────────────────────────────────
+
+  /ds:
+    post:
+      tags: [Data Science]
+      operationId: createDataDecision
+      summary: Decision from raw signals
+      description: |
+        Makes a decision based on raw numeric signals. The server profiles the signal
+        data (statistics, distribution, anomalies) and folds the analysis into context
+        before deciding.
+
+        `kind` selects the decision type: `set` (default, multi-select), `choice`
+        (pick one), or `boolean` (yes/no). Candidates must be in `options`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DataDecisionRequest"
+            example:
+              signals:
+                - name: temperature
+                  data: [[72.1, 73.5, 89.2, 91.0, 88.5, 72.0]]
+                  fs: 1
+              question: Which analysis method fits this signal?
+              kind: choice
+              options: ["spectral analysis (FFT)", "linear regression"]
+              think: false
+      responses:
+        "200":
+          description: Standard decision envelope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CategoricalDecision"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "503":
+          $ref: "#/components/responses/Overloaded"
+
+  # ── Batch ──────────────────────────────────────────────────────
+
+  /v1/systemone:
+    post:
+      tags: [Batch]
+      operationId: createBatchDecision
+      summary: Multiple typed questions in one request
+      description: |
+        Send one context (`state`, plus optional images/documents/signals) and many
+        named questions. Each question is independently typed and answered.
+
+        **Question types:** `boolean` (or `noul` / `bool`), `choice`, `score`, `set`,
+        `box` (visual grounding). Unknown types are rejected (422).
+
+        **Defaults:** fast mode, no thinking, no abstention. Set `mode: "deep"` to
+        enable abstention (`abstained: true` is then possible on individual answers).
+
+        Each question is metered independently; `usage.billable_tokens` is the sum
+        of per-question minimums.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BatchRequest"
+            example:
+              state: I was double-charged and support never replied.
+              questions:
+                team:
+                  type: choice
+                  instructions: Which team?
+                  criteria:
+                    billing: Billing disputes and invoices
+                    tech: Product defects
+                    sales: New purchases
+                urgent:
+                  type: boolean
+                  instructions: Is this urgent?
+                risk:
+                  type: score
+                  instructions: Churn risk from 0 to 1
+                  buckets: 5
+      responses:
+        "200":
+          description: Named answers keyed by question name.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BatchResponse"
+              example:
+                model: dec-1
+                answers:
+                  team:
+                    type: choice
+                    choice: billing
+                    confidence: 0.93
+                    probabilities:
+                      billing: 0.93
+                      tech: 0.04
+                      sales: 0.03
+                    abstained: false
+                  urgent:
+                    type: noul
+                    probability: 0.88
+                    confidence: 0.88
+                    abstained: false
+                  risk:
+                    type: score
+                    score: 0.75
+                    confidence: 0.6
+                    distribution:
+                      "0": 0.05
+                      "0.25": 0.1
+                      "0.5": 0.2
+                      "0.75": 0.6
+                      "1": 0.05
+                    abstained: false
+                usage:
+                  questions: 3
+                  input_tokens: 1200
+                  billable_tokens: 3000
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "503":
+          $ref: "#/components/responses/Overloaded"
+
+  # ── Models ─────────────────────────────────────────────────────
+
+  /capabilities:
+    get:
+      tags: [Models]
+      operationId: getCapabilities
+      summary: Discover available decision types and modalities
+      description: |
+        Returns the model's supported decision types, input modalities, evidence
+        modes, and whether abstention is enabled — for this deployment.
+      responses:
+        "200":
+          description: Capabilities document.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Capabilities"
+              example:
+                model: dec-1
+                decision_types:
+                  [decide, boolean, choice, score, set, span, ground]
+                modalities:
+                  text:
+                    available: true
+                  image:
+                    available: true
+                    grounding_available: true
+                  document:
+                    available: true
+                  audio:
+                    available: true
+                evidence:
+                  spans: true
+                abstention: true
+
+  /v1/models:
+    get:
+      tags: [Models]
+      operationId: listModels
+      summary: List available models
+      description: Returns the models available on this deployment.
+      responses:
+        "200":
+          description: Model list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelList"
+              example:
+                models:
+                  - name: dec-1
+                    description: Bivia foundation decision model.
+                    release_date: "2026-10-20"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        Pass your API key or access token as `Authorization: Bearer <token>`.
+
+  responses:
+    Unprocessable:
+      description: |
+        The request is syntactically valid but semantically invalid — for example,
+        too many options (> 26), an unknown question type, or an invalid mode value.
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: "#/components/schemas/InvalidRequest"
+              - $ref: "#/components/schemas/ValidationError"
+    Overloaded:
+      description: Server is at capacity. Retry after the indicated delay.
+      headers:
+        Retry-After:
+          schema:
+            type: string
+            example: "1"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Overloaded"
+
+  schemas:
+    # ── Input types ────────────────────────────────────────────
+
+    ImageRef:
+      type: object
+      description: |
+        An image to include as context. Provide either `url` (public HTTP/HTTPS) or
+        `b64` (base64-encoded bytes with `mime`). At most 16 images per request,
+        each ≤ 25 MB and ≤ 50 megapixels.
+      properties:
+        url:
+          type: string
+          description: Public HTTP(S) image URL. The server fetches it within a shared 60-second budget.
+          example: https://example.com/photo.png
+        b64:
+          type: string
+          description: Base64-encoded image bytes (raw base64, not a `data:` URL). Pair with `mime`.
+        mime:
+          type: string
+          default: image/png
+          description: MIME type for `b64` content. Must be an `image/*` type.
+          example: image/png
+
+    AudioRef:
+      type: object
+      description: |
+        An audio clip to include as context. Provide either `url` or `b64` (with `mime`).
+        Supported formats: WAV, MP3, OGG, FLAC. Auto-resampled to 16 kHz.
+      properties:
+        url:
+          type: string
+          description: Public HTTP(S) audio URL.
+        b64:
+          type: string
+          description: Base64-encoded audio bytes.
+        mime:
+          type: string
+          default: audio/wav
+          description: MIME type for `b64` content.
+          example: audio/wav
+
+    DocumentRef:
+      type: object
+      description: |
+        A document to include as context. The server extracts plain text and folds it
+        into the decision context. Supported formats: PDF, DOCX, PPTX, XLSX, JSON,
+        CSV/TSV, TXT, Markdown, HTML, source code.
+
+        Limits: 25 MB per file, 16 documents per request, 48,000 extracted characters total.
+      properties:
+        url:
+          type: string
+          description: Public HTTP(S) URL to fetch the document from.
+        b64:
+          type: string
+          description: Base64-encoded file bytes.
+        filename:
+          type: string
+          description: Helps format detection (e.g., `memo.txt`, `contract.pdf`).
+        mime:
+          type: string
+          description: MIME type of the document.
+
+    SignalRef:
+      type: object
+      description: A raw numeric signal for data-science decisions.
+      required: [data]
+      properties:
+        name:
+          type: string
+          default: signal
+          description: Human-readable name for the signal.
+        data:
+          description: |
+            Signal data as `[channels][timesteps]` (list of lists). Each inner list is
+            one channel of samples.
+        channels:
+          type: integer
+          description: Number of channels (required when `data` is a base64 buffer).
+        fs:
+          type: number
+          description: Sample rate in Hz.
+        dtype:
+          type: string
+          default: float32
+          description: Data type when `data` is a base64 buffer.
+
+    VideoRef:
+      type: object
+      description: A video clip. Provide `url` or `b64`. Maximum 200 MB.
+      properties:
+        url:
+          type: string
+          description: Public HTTP(S) video URL.
+        b64:
+          type: string
+          description: Base64-encoded video bytes.
+        mime:
+          type: string
+          default: video/mp4
+        max_edge:
+          type: integer
+          minimum: 64
+          maximum: 1792
+          default: 896
+          description: Downscale frame long edge to this size before processing.
+
+    # ── Decision request fields ────────────────────────────────
+
+    Mode:
+      type: string
+      enum: [fast, deep]
+      default: fast
+      description: |
+        `fast` — single-pass inference (lowest latency, default).
+        `deep` — adds a verification step for higher confidence on hard questions.
+        Any other value is rejected (422).
+
+    DecisionFields:
+      type: object
+      description: Common fields shared by all decision request types.
+      properties:
+        state:
+          type: string
+          default: ""
+          description: Text context for the decision. May be empty when images or documents carry the context.
+        images:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImageRef"
+          description: Optional images to include as context.
+        audio:
+          type: array
+          items:
+            $ref: "#/components/schemas/AudioRef"
+          description: Optional audio clips to include as context.
+        documents:
+          type: array
+          items:
+            $ref: "#/components/schemas/DocumentRef"
+          description: Optional documents to include as context.
+        question:
+          type: string
+          description: The question to decide.
+        domain:
+          type: string
+          description: Optional domain hint for specialized few-shot behavior (e.g., `finance`).
+        mode:
+          $ref: "#/components/schemas/Mode"
+        think:
+          type: boolean
+          default: true
+          description: |
+            Whether to allow a reasoning trace before deciding. Only honored in `fast`
+            mode; ignored for `deep`. Set to `false` for lowest latency.
+        allow_abstain:
+          type: boolean
+          default: true
+          description: |
+            When `true` (default), the model may abstain if it lacks confidence.
+            When `false`, abstention is replaced by the best-effort answer.
+
+    # ── Decision requests ──────────────────────────────────────
+
+    BooleanRequest:
+      allOf:
+        - $ref: "#/components/schemas/DecisionFields"
+        - type: object
+          required: [question]
+
+    ChoiceRequest:
+      allOf:
+        - $ref: "#/components/schemas/DecisionFields"
+        - type: object
+          required: [question, choices]
+          properties:
+            choices:
+              type: array
+              minItems: 2
+              maxItems: 26
+              items:
+                x-stainless-any: true
+              description: The options to choose from (2–26 items).
+
+    DecideRequest:
+      allOf:
+        - $ref: "#/components/schemas/DecisionFields"
+        - type: object
+          required: [question]
+          properties:
+            outcomes:
+              type: array
+              minItems: 2
+              maxItems: 26
+              items:
+                x-stainless-any: true
+              description: |
+                Candidate outcomes (2–26 items). When omitted, the model infers
+                options from the question text.
+
+    ScoreRequest:
+      allOf:
+        - $ref: "#/components/schemas/DecisionFields"
+        - type: object
+          required: [question]
+          properties:
+            range:
+              type: array
+              minItems: 2
+              maxItems: 2
+              items:
+                type: number
+              default: [0.0, 1.0]
+              description: Inclusive `[low, high]` of the numeric scale.
+            buckets:
+              type: integer
+              minimum: 2
+              default: 11
+              description: Number of evenly spaced levels on the scale.
+
+    SetRequest:
+      allOf:
+        - $ref: "#/components/schemas/DecisionFields"
+        - type: object
+          required: [question, options]
+          properties:
+            options:
+              type: array
+              items:
+                x-stainless-any: true
+              description: The options to select from (zero or more may be selected).
+
+    SpanRequest:
+      type: object
+      required: [question]
+      properties:
+        state:
+          type: string
+          default: ""
+          description: The text to search for spans in.
+        images:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImageRef"
+          description: Optional images (spans are still character ranges into `state`).
+        documents:
+          type: array
+          items:
+            $ref: "#/components/schemas/DocumentRef"
+        question:
+          type: string
+          description: What to locate in the text.
+        domain:
+          type: string
+
+    GroundRequest:
+      type: object
+      properties:
+        question:
+          type: string
+          default: ""
+          description: What to find (e.g., "the invoice total", "the crack"). Empty detects regions broadly.
+        images:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImageRef"
+          description: The image(s) to search.
+        documents:
+          type: array
+          items:
+            $ref: "#/components/schemas/DocumentRef"
+        state:
+          type: string
+          default: ""
+        domain:
+          type: string
+
+    VideoScanRequest:
+      type: object
+      required: [video, query]
+      properties:
+        video:
+          $ref: "#/components/schemas/VideoRef"
+        query:
+          type: string
+          description: What to find in the video.
+        kind:
+          type: string
+          enum: [object, event]
+          default: object
+          description: |
+            `object` — find temporal intervals where the object appears, with bounding boxes.
+            `event` — find the onset timestamp of a happening.
+        coarse_step:
+          type: number
+          exclusiveMinimum: 0
+          default: 5.0
+          description: Seconds between coarse scan samples.
+        fine_resolution:
+          type: number
+          exclusiveMinimum: 0
+          default: 0.5
+          description: Seconds between fine scan samples within detected intervals.
+        boxes_on_hits:
+          type: boolean
+          default: true
+          description: Whether to return per-frame bounding boxes on hit intervals.
+        max_probes:
+          type: integer
+          minimum: 1
+          default: 200
+          description: Maximum number of frames to probe.
+        allow_abstain:
+          type: boolean
+          default: true
+
+    DataDecisionRequest:
+      type: object
+      required: [question]
+      properties:
+        signals:
+          type: array
+          items:
+            $ref: "#/components/schemas/SignalRef"
+          description: Raw numeric signals to analyze.
+        state:
+          type: string
+          default: ""
+        images:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImageRef"
+        documents:
+          type: array
+          items:
+            $ref: "#/components/schemas/DocumentRef"
+        question:
+          type: string
+        options:
+          type: array
+          items:
+            x-stainless-any: true
+          description: Candidate answers. Required for useful `choice` or `set` results.
+        kind:
+          type: string
+          enum: [set, choice, boolean]
+          default: set
+          description: Which decision type to use.
+        domain:
+          type: string
+        mode:
+          $ref: "#/components/schemas/Mode"
+        think:
+          type: boolean
+          default: true
+        allow_abstain:
+          type: boolean
+          default: true
+
+    # ── Batch request/response ─────────────────────────────────
+
+    BatchRequest:
+      type: object
+      properties:
+        model:
+          type: string
+          description: Accepted for compatibility. The response model is always `dec-1`.
+        state:
+          type: string
+          default: ""
+        images:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImageRef"
+        audio:
+          type: array
+          items:
+            $ref: "#/components/schemas/AudioRef"
+        documents:
+          type: array
+          items:
+            $ref: "#/components/schemas/DocumentRef"
+        signals:
+          type: array
+          items:
+            $ref: "#/components/schemas/SignalRef"
+        questions:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/BatchQuestion"
+          description: Map of question name → typed question definition.
+        mode:
+          $ref: "#/components/schemas/Mode"
+
+    BatchQuestion:
+      type: object
+      properties:
+        type:
+          type: string
+          description: |
+            `boolean` (or `noul` / `bool`), `choice`, `score`, `set`, `box`.
+            Unknown types are rejected (422). Defaults to `choice` when omitted.
+          example: choice
+        instructions:
+          type: string
+          description: The question text.
+        question:
+          type: string
+          description: Alternative to `instructions`.
+        criteria:
+          description: |
+            Choice options. An object maps option key → description; a list of names
+            is also accepted.
+          oneOf:
+            - type: object
+              additionalProperties:
+                type: string
+            - type: array
+              items:
+                x-stainless-any: true
+        options:
+          type: array
+          items:
+            x-stainless-any: true
+          description: Choice names (used when `criteria` is empty).
+        levels:
+          description: |
+            Score bucket labels. Must be a list when present; a non-list type is
+            rejected (422). Array length sets the bucket count.
+          type: ["array", "null"]
+        buckets:
+          type: integer
+          default: 11
+          minimum: 2
+          description: Score bucket count when `levels` is not provided.
+
+    BatchResponse:
+      type: object
+      required: [model, answers, usage]
+      properties:
+        model:
+          type: string
+          enum: [dec-1]
+        answers:
+          type: object
+          additionalProperties:
+            oneOf:
+              - $ref: "#/components/schemas/BatchChoiceAnswer"
+              - $ref: "#/components/schemas/BatchBooleanAnswer"
+              - $ref: "#/components/schemas/BatchScoreAnswer"
+              - $ref: "#/components/schemas/BatchSetAnswer"
+              - $ref: "#/components/schemas/BatchBoxAnswer"
+          description: Answers keyed by the question names from the request.
+        usage:
+          $ref: "#/components/schemas/Usage"
+
+    BatchChoiceAnswer:
+      type: object
+      required: [type, choice, abstained]
+      properties:
+        type:
+          type: string
+          enum: [choice]
+        choice: {}
+        confidence:
+          type: ["number", "null"]
+          description: P(choice). Null when abstained.
+        probabilities:
+          type: object
+          additionalProperties:
+            type: number
+        abstained:
+          type: boolean
+
+    BatchBooleanAnswer:
+      type: object
+      required: [type, abstained]
+      properties:
+        type:
+          type: string
+          enum: [noul]
+        noul:
+          type: number
+          description: P(yes) in [0, 1].
+        probability:
+          type: number
+          description: Same as `noul` — P(yes).
+        confidence:
+          type: ["number", "null"]
+        abstained:
+          type: boolean
+
+    BatchScoreAnswer:
+      type: object
+      required: [type, score, abstained]
+      properties:
+        type:
+          type: string
+          enum: [score]
+        score:
+          type: ["number", "null"]
+          description: Expected value on [0, 1]. Null when abstained.
+        confidence:
+          type: ["number", "null"]
+        legend:
+          type: object
+          additionalProperties:
+            type: string
+          description: Index → label mapping from the criteria array.
+        probabilities:
+          type: object
+          additionalProperties:
+            type: number
+        distribution:
+          type: object
+          additionalProperties:
+            type: number
+        abstained:
+          type: boolean
+
+    BatchSetAnswer:
+      type: object
+      required: [type, selected, abstained]
+      properties:
+        type:
+          type: string
+          enum: [set]
+        selected:
+          type: array
+          items:
+            x-stainless-any: true
+          description: Options selected (probability ≥ 0.5).
+        probabilities:
+          type: object
+          additionalProperties:
+            type: number
+        abstained:
+          type: boolean
+
+    BatchBoxAnswer:
+      type: object
+      required: [type, abstained]
+      properties:
+        type:
+          type: string
+          enum: [box]
+        box:
+          type: ["object", "null"]
+          properties:
+            left:
+              type: number
+            top:
+              type: number
+            right:
+              type: number
+            bottom:
+              type: number
+          description: Normalized [0, 1] bounding box. Null when abstained.
+        label:
+          type: string
+        confidence:
+          type: ["number", "null"]
+        abstained:
+          type: boolean
+
+    # ── Response types ─────────────────────────────────────────
+
+    Verification:
+      type: object
+      required: [performed, result]
+      properties:
+        performed:
+          type: boolean
+          description: Whether the verification step ran (only in `deep` mode).
+        result:
+          type: string
+          enum: [passed, conflict, insufficient, not_applicable]
+          description: |
+            `passed` — verification confirmed the answer.
+            `conflict` — verification disagreed (triggers abstention in deep mode).
+            `insufficient` — not enough evidence to verify.
+            `not_applicable` — verification was not performed (fast mode).
+
+    EvidenceSpan:
+      type: object
+      required: [start, end, text]
+      properties:
+        start:
+          type: integer
+          description: Inclusive character offset into the `state` text.
+        end:
+          type: integer
+          description: Exclusive character offset.
+        text:
+          type: string
+          description: The quoted substring.
+
+    Evidence:
+      type: object
+      properties:
+        spans:
+          type: array
+          items:
+            $ref: "#/components/schemas/EvidenceSpan"
+          description: Character ranges in the input text that support the decision.
+
+    DocumentNote:
+      type: object
+      required: [document, status]
+      properties:
+        document:
+          type: string
+          description: Filename or URL of the document.
+        status:
+          type: string
+          enum: [included, truncated, skipped]
+        chars:
+          type: integer
+          description: Number of characters extracted.
+        tokens:
+          type: integer
+        truncated:
+          type: boolean
+        reason:
+          type: string
+          description: Why the document was truncated or skipped.
+
+    EnvelopeBase:
+      type: object
+      description: |
+        The decision envelope — every decision endpoint returns this structure.
+        The `type` field indicates which decision type produced the answer, and
+        `value` contains the typed result.
+      required:
+        [
+          type,
+          value,
+          status,
+          mode,
+          thought,
+          verification,
+          evidence,
+          latency_ms,
+          model,
+        ]
+      properties:
+        type:
+          type: string
+          description: The decision type that produced this answer.
+        value: {}
+        status:
+          type: string
+          enum: [answered, abstained]
+          description: |
+            `answered` — the model produced a confident answer.
+            `abstained` — the model was not confident enough; `value` is `null`.
+        abstain_reason:
+          type: ["string", "null"]
+          enum:
+            - low_confidence
+            - readout_disagreement
+            - insufficient_evidence
+            - unresolved_after_thinking
+            - null
+          description: |
+            Why the model abstained. `null` when `status` is `answered`.
+            - `low_confidence` — probability mass was too spread out.
+            - `readout_disagreement` — deep verification found a conflict.
+            - `insufficient_evidence` — not enough context to decide.
+            - `unresolved_after_thinking` — reasoning did not resolve ambiguity.
+        mode:
+          type: string
+          enum: [fast, deep]
+        think_allowed:
+          type: boolean
+          description: Whether thinking was allowed for this call. Only present in fast mode.
+        thought:
+          type: boolean
+          description: Whether a reasoning trace was actually generated.
+        grounded:
+          type: boolean
+          description: |
+            `true` when the answer is grounded in the provided context (a direct readout).
+            `false` when the answer is free-form generation.
+        verification:
+          $ref: "#/components/schemas/Verification"
+        evidence:
+          $ref: "#/components/schemas/Evidence"
+        latency_ms:
+          type: number
+          description: Server-side processing time in milliseconds.
+        model:
+          type: string
+          description: The model that produced this decision.
+          example: dec-1
+        input_tokens:
+          type: integer
+          description: Total tokens processed (text + images + documents + audio).
+        image_tokens:
+          type: integer
+          description: Image-specific subset of `input_tokens`.
+        document_tokens:
+          type: integer
+          description: Document-specific subset of `input_tokens`. Present when documents were sent.
+        billable_tokens:
+          type: integer
+          description: |
+            Billing token count = `max(1000, input_tokens)`. This is the number used
+            for usage metering, with a per-decision floor of 1,000 tokens.
+        document_notes:
+          type: array
+          items:
+            $ref: "#/components/schemas/DocumentNote"
+          description: Per-document extraction status. Present when documents were sent.
+
+    CategoricalDecision:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            type:
+              type: string
+              enum: [decide, choice, boolean]
+            probability:
+              type: number
+              description: P(value). Omitted when the model abstains.
+            distribution:
+              type: object
+              additionalProperties:
+                type: number
+              description: |
+                Probability of each label, summing to 1. Present even on abstention.
+                For boolean decisions, keys are `yes` and `no`.
+
+    ScoreDecision:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            type:
+              type: string
+              enum: [score]
+            value:
+              type: ["number", "null"]
+              description: Expected value on the requested range. Null when abstained.
+            levels:
+              type: object
+              additionalProperties:
+                type: number
+              description: Per-level probability. Keys are formatted level values (e.g., `"0"`, `"0.1"`, `"1"`).
+
+    SetDecision:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            type:
+              type: string
+              enum: [set]
+            value:
+              type: array
+              items:
+                x-stainless-any: true
+              description: Options with probability ≥ 0.5, in request order.
+            probabilities:
+              type: object
+              additionalProperties:
+                type: number
+              description: Independent P(option applies) for each option. Does not sum to 1.
+
+    SpanDecision:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            type:
+              type: string
+              enum: [span]
+            value:
+              type: array
+              items:
+                $ref: "#/components/schemas/EvidenceSpan"
+              description: Text spans found in the input.
+
+    GroundRegion:
+      type: object
+      required: [label, box]
+      properties:
+        label:
+          type: string
+        box:
+          type: array
+          minItems: 4
+          maxItems: 4
+          items:
+            type: number
+          description: "`[x1, y1, x2, y2]` coordinates normalized to `[0, 1000]`."
+        score:
+          type: number
+          description: Detection confidence.
+
+    GroundDecision:
+      type: object
+      required: [type, value, count, found, grounded]
+      description: |
+        Grounding response. Unlike other decision types, this does not include
+        the full decision envelope (no status, mode, verification, evidence, etc.).
+      properties:
+        type:
+          type: string
+          enum: [ground]
+        value:
+          type: array
+          items:
+            $ref: "#/components/schemas/GroundRegion"
+          description: Detected regions. Empty array when nothing found.
+        count:
+          type: integer
+          description: Number of regions found.
+        found:
+          type: boolean
+          description: Whether any regions were detected.
+        grounded:
+          type: boolean
+          description: Always `true` for grounding responses.
+
+    VideoGroundDecision:
+      type: object
+      required: [type, kind, duration_s, hits]
+      properties:
+        type:
+          type: string
+          enum: [video_ground]
+        kind:
+          type: string
+          enum: [object, event]
+        duration_s:
+          type: number
+          description: Total clip duration in seconds.
+        scanned:
+          type: integer
+          description: Number of frames probed.
+        truncated:
+          type: boolean
+          description: Whether scanning was truncated by `max_probes`.
+        hits:
+          type: array
+          items:
+            type: object
+          description: |
+            For `kind: "object"` — each hit has `start`, `end`, `peak_t`, `confidence`,
+            and optional `boxes` (array of GroundRegion).
+            For `kind: "event"` — each hit has `onset_t` and `confidence`.
+        input_tokens:
+          type: integer
+        image_tokens:
+          type: integer
+        billable_tokens:
+          type: integer
+
+    Usage:
+      type: object
+      required: [questions, input_tokens, billable_tokens]
+      properties:
+        questions:
+          type: integer
+          description: Number of questions in the batch request.
+        input_tokens:
+          type: integer
+          description: Sum of per-question input tokens.
+        output_tokens:
+          type: integer
+          description: Typically 0 for decision readouts.
+        billable_tokens:
+          type: integer
+          description: Sum of per-question billing token minimums.
+
+    Capabilities:
+      type: object
+      properties:
+        model:
+          type: string
+          example: dec-1
+        decision_types:
+          type: array
+          items:
+            type: string
+          description: Supported decision types on this deployment.
+        modalities:
+          type: object
+          additionalProperties:
+            type: object
+          description: Available input modalities and their feature flags.
+        evidence:
+          type: object
+          description: Supported evidence types.
+        abstention:
+          type: boolean
+          description: Whether abstention is enabled.
+
+    ModelList:
+      type: object
+      required: [models]
+      properties:
+        models:
+          type: array
+          items:
+            type: object
+            required: [name]
+            properties:
+              name:
+                type: string
+              description:
+                type: string
+              release_date:
+                type: string
+
+    # ── Error types ────────────────────────────────────────────
+
+    InvalidRequest:
+      type: object
+      required: [error, detail]
+      properties:
+        error:
+          type: string
+          enum: [invalid_request]
+        detail:
+          type: string
+          description: Human-readable error message.
+
+    ValidationError:
+      type: object
+      required: [detail]
+      properties:
+        detail:
+          type: array
+          items:
+            type: object
+            properties:
+              loc:
+                type: array
+                items:
+                  x-stainless-any: true
+                description: JSON path to the invalid field.
+              msg:
+                type: string
+              type:
+                type: string
+
+    Overloaded:
+      type: object
+      required: [error, detail]
+      properties:
+        error:
+          type: string
+          enum: [overloaded]
+        detail:
+          type: string
