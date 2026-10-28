@@ -19,7 +19,10 @@ info:
     | `POST /score`   | A number on your scale, with per-level mass |
     | `POST /set`     | Zero or more labels (multi-select) |
     | `POST /span`    | Character offsets into the input text |
-    | `POST /ground`  | Bounding boxes in an image |
+    | `POST /extract` | Exact field values copied from document text, with offsets |
+    | `POST /ground`  | Bounding boxes in an image or temporal intervals in a video |
+    | `POST /ds`      | Decision over profiled numeric signals |
+    | `POST /v1/systemone` | Multiple named typed answers in a single batch call |
 
     ## Key concepts
 
@@ -46,6 +49,7 @@ info:
   contact:
     name: Articul8 AI
     url: https://articul8.ai
+    email: support@articul8.ai
   license:
     name: Proprietary
     url: https://articul8.ai/eula
@@ -63,21 +67,24 @@ tags:
       Core decision primitives. Each endpoint takes a question with optional context
       and returns a typed, calibrated answer. Use the specific type endpoint when you
       know what kind of answer you want, or `POST /decide` to let the model auto-detect.
-  - name: Grounding
+  - name: Evidence
     description: |
-      Visual grounding — locate objects or events in images and video. Returns bounding
-      boxes with coordinates normalized to `[0, 1000]`.
+      Point at what supports an answer: extract text spans, exact
+      document fields, image bounding boxes, and video temporal intervals.
+  - name: Data Science
+    description: |
+      Decisions over raw numeric signals. The server profiles the signal and folds
+      the analysis into context before deciding.
   - name: Batch
     description: |
       Ask multiple typed questions against the same context in a single request.
       Each question is independently typed (boolean, choice, score, set, or box) and
       independently answered.
-  - name: Data Science
-    description: |
-      Decisions over raw numeric signals. The server profiles the signal and folds
-      the analysis into context before deciding.
   - name: Models
-    description: Model discovery and capability introspection.
+    description: Model discovery.
+  - name: Service
+    description: Health, readiness and capabilities.
+
 
 x-stainless-config:
   package-name:
@@ -123,13 +130,19 @@ paths:
                   question: Does this contract contain an auto-renewal clause?
                   documents:
                     - url: https://example.com/contract.pdf
+              with_audio:
+                summary: Question about an audio clip
+                value:
+                  question: Is the caller asking to cancel their subscription?
+                  audio:
+                    - url: https://example.com/support-call.wav
       responses:
         "200":
           description: 'Decision envelope with `type: "boolean"`.'
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/CategoricalDecision"
+                $ref: "#/components/schemas/BooleanDecision"
               examples:
                 answered:
                   summary: Confident answer
@@ -145,7 +158,6 @@ paths:
                     mode: fast
                     think_allowed: false
                     thought: false
-                    grounded: true
                     verification:
                       performed: false
                       result: not_applicable
@@ -168,7 +180,6 @@ paths:
                     mode: fast
                     think_allowed: true
                     thought: false
-                    grounded: true
                     verification:
                       performed: false
                       result: not_applicable
@@ -178,8 +189,14 @@ paths:
                     model: dec-1
                     input_tokens: 245
                     billable_tokens: 1000
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
         "422":
           $ref: "#/components/responses/Unprocessable"
+        "500":
+          $ref: "#/components/responses/ServerError"
         "503":
           $ref: "#/components/responses/Overloaded"
 
@@ -213,13 +230,27 @@ paths:
                   choices: [BILLING, TECHNICAL]
                   images:
                     - url: https://example.com/label.png
+              with_document:
+                summary: Classify a document
+                value:
+                  question: What type of agreement is this?
+                  choices: [NDA, MSA, SOW]
+                  documents:
+                    - url: https://example.com/agreement.pdf
+              with_audio:
+                summary: Classify an audio clip
+                value:
+                  question: Which department should this call be routed to?
+                  choices: [billing, refunds, technical]
+                  audio:
+                    - url: https://example.com/support-call.wav
       responses:
         "200":
           description: 'Decision envelope with `type: "choice"`.'
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/CategoricalDecision"
+                $ref: "#/components/schemas/ChoiceDecision"
               example:
                 type: choice
                 value: billing
@@ -233,7 +264,6 @@ paths:
                 mode: fast
                 think_allowed: true
                 thought: false
-                grounded: true
                 verification:
                   performed: false
                   result: not_applicable
@@ -243,8 +273,14 @@ paths:
                 model: dec-1
                 input_tokens: 320
                 billable_tokens: 1000
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
         "422":
           $ref: "#/components/responses/Unprocessable"
+        "500":
+          $ref: "#/components/responses/ServerError"
         "503":
           $ref: "#/components/responses/Overloaded"
 
@@ -262,7 +298,9 @@ paths:
 
         Provide `outcomes` to constrain the options; otherwise the model infers
         them from the question text. At least 2 outcomes are required when provided.
-        More than 26 is rejected (422).
+        More than 26 is rejected (422). Without `outcomes`, a question about the
+        attached images (e.g., "Where is the red square?") can return a grounding
+        response (`type: "ground"`), and `read_as` reports how the question was framed.
       requestBody:
         required: true
         content:
@@ -270,7 +308,7 @@ paths:
             schema:
               $ref: "#/components/schemas/DecideRequest"
             examples:
-              with_outcomes:
+              text_only:
                 summary: Explicit outcomes
                 value:
                   state: Patient has fever, cough, and a right lower lobe infiltrate on chest x-ray.
@@ -281,6 +319,27 @@ paths:
                 value:
                   state: The quarterly revenue was $4.2M, up 15% from last quarter.
                   question: Is this a good quarter?
+              with_image:
+                summary: Decide over an image
+                value:
+                  question: What condition is shown in this scan?
+                  outcomes: [common cold, pneumonia, healthy]
+                  images:
+                    - url: https://example.com/chest-xray.png
+              with_document:
+                summary: Decide over a document
+                value:
+                  question: Should legal approve this vendor contract?
+                  outcomes: [approve, request changes, reject]
+                  documents:
+                    - url: https://example.com/vendor-contract.pdf
+              with_audio:
+                summary: Decide over an audio clip
+                value:
+                  question: What should the agent do next?
+                  outcomes: [issue refund, escalate to supervisor, close ticket]
+                  audio:
+                    - url: https://example.com/support-call.wav
       responses:
         "200":
           description: |
@@ -289,7 +348,12 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/CategoricalDecision"
+                oneOf:
+                  - $ref: "#/components/schemas/CategoricalDecision"
+                  - $ref: "#/components/schemas/ScoreDecision"
+                  - $ref: "#/components/schemas/SetDecision"
+                  - $ref: "#/components/schemas/SpanDecision"
+                  - $ref: "#/components/schemas/GroundDecision"
               examples:
                 answered:
                   summary: Confident answer
@@ -306,7 +370,6 @@ paths:
                     mode: fast
                     think_allowed: false
                     thought: false
-                    grounded: true
                     verification:
                       performed: false
                       result: not_applicable
@@ -330,7 +393,6 @@ paths:
                     mode: fast
                     think_allowed: true
                     thought: false
-                    grounded: true
                     verification:
                       performed: false
                       result: not_applicable
@@ -340,8 +402,14 @@ paths:
                     model: dec-1
                     input_tokens: 380
                     billable_tokens: 1000
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
         "422":
           $ref: "#/components/responses/Unprocessable"
+        "500":
+          $ref: "#/components/responses/ServerError"
         "503":
           $ref: "#/components/responses/Overloaded"
 
@@ -361,6 +429,9 @@ paths:
         If the question text does not already name both range endpoints, the server
         appends "Answer on a numeric scale from {lo} to {hi}." so the model sees the
         scale.
+
+        Audio is accepted only on deployments that transcribe speech; otherwise a
+        request with `audio` returns `503`.
       requestBody:
         required: true
         content:
@@ -368,7 +439,7 @@ paths:
             schema:
               $ref: "#/components/schemas/ScoreRequest"
             examples:
-              urgency:
+              text_only:
                 summary: Urgency score 0–1
                 value:
                   state: Customer threatened to cancel today.
@@ -382,6 +453,30 @@ paths:
                   question: Overall dining experience?
                   range: [0, 10]
                   buckets: 11
+              with_image:
+                summary: Score from an image
+                value:
+                  question: How severe is the surface damage (0=none, 10=total loss)?
+                  range: [0, 10]
+                  buckets: 11
+                  images:
+                    - url: https://example.com/product-photo.jpg
+              with_document:
+                summary: Score a document
+                value:
+                  question: What is the compliance risk of this agreement (0=low, 1=high)?
+                  range: [0, 1]
+                  buckets: 11
+                  documents:
+                    - url: https://example.com/contract.pdf
+              with_audio:
+                summary: Score an audio clip
+                value:
+                  question: How frustrated is the caller (0=calm, 10=very frustrated)?
+                  range: [0, 10]
+                  buckets: 11
+                  audio:
+                    - url: https://example.com/support-call.wav
       responses:
         "200":
           description: 'Decision envelope with `type: "score"`.'
@@ -409,7 +504,6 @@ paths:
                 mode: fast
                 think_allowed: false
                 thought: false
-                grounded: true
                 verification:
                   performed: false
                   result: not_applicable
@@ -419,8 +513,14 @@ paths:
                 model: dec-1
                 input_tokens: 290
                 billable_tokens: 1000
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
         "422":
           $ref: "#/components/responses/Unprocessable"
+        "500":
+          $ref: "#/components/responses/ServerError"
         "503":
           $ref: "#/components/responses/Overloaded"
 
@@ -433,16 +533,43 @@ paths:
         Independent yes/no probability per option (not a distribution that sums to 1).
         `value` contains every option whose probability is at least 0.5, in request
         order. The `probabilities` map shows the independent P(applies) for each option.
+
+        Audio is accepted only on deployments that transcribe speech; otherwise a
+        request with `audio` returns `503`.
       requestBody:
         required: true
         content:
           application/json:
             schema:
               $ref: "#/components/schemas/SetRequest"
-            example:
-              state: Order arrived damaged and the customer wants money back.
-              question: Which actions apply?
-              options: [cancel, refund, status]
+            examples:
+              text_only:
+                summary: Select applicable actions
+                value:
+                  state: Order arrived damaged and the customer wants money back.
+                  question: Which actions apply?
+                  options: [cancel, refund, status]
+              with_image:
+                summary: Select labels from an image
+                value:
+                  question: Which defects are visible in the photo?
+                  options: [scratch, dent, crack, discoloration]
+                  images:
+                    - url: https://example.com/product-photo.jpg
+              with_document:
+                summary: Select clauses in a document
+                value:
+                  question: Which clauses are present in this contract?
+                  options: [auto-renewal, indemnification, non-compete, limitation of liability]
+                  documents:
+                    - url: https://example.com/contract.pdf
+              with_audio:
+                summary: Select topics from an audio clip
+                value:
+                  question: Which topics were discussed on the call?
+                  options: [billing, cancellation, refund, technical support]
+                  audio:
+                    - url: https://example.com/support-call.wav
       responses:
         "200":
           description: 'Decision envelope with `type: "set"`.'
@@ -462,7 +589,6 @@ paths:
                 mode: fast
                 think_allowed: true
                 thought: false
-                grounded: true
                 verification:
                   performed: false
                   result: not_applicable
@@ -472,14 +598,20 @@ paths:
                 model: dec-1
                 input_tokens: 310
                 billable_tokens: 1000
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
         "422":
           $ref: "#/components/responses/Unprocessable"
+        "500":
+          $ref: "#/components/responses/ServerError"
         "503":
           $ref: "#/components/responses/Overloaded"
 
   /span:
     post:
-      tags: [Decisions]
+      tags: [Evidence]
       operationId: createSpanDecision
       summary: Locate text spans in the input
       description: |
@@ -516,7 +648,6 @@ paths:
                 mode: fast
                 think_allowed: false
                 thought: false
-                grounded: true
                 verification:
                   performed: false
                   result: not_applicable
@@ -529,8 +660,110 @@ paths:
                 model: dec-1
                 input_tokens: 220
                 billable_tokens: 1000
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
         "422":
           $ref: "#/components/responses/Unprocessable"
+        "500":
+          $ref: "#/components/responses/ServerError"
+        "503":
+          $ref: "#/components/responses/Overloaded"
+
+  # ── Evidence ───────────────────────────────────────────────────
+
+  /extract:
+    post:
+      tags: [Evidence]
+      operationId: extractFields
+      summary: Extract field values from a document
+      description: |
+        Extracts one field (`question`) or multiple fields (`fields`) from `state` or
+        attached `documents`, returning the exact text from the document along with its
+        character offsets (`start`, `end`). Values are copied directly from the source,
+        never paraphrased or generated.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExtractRequest"
+            examples:
+              single_field:
+                summary: Single field
+                value:
+                  state: Either party may terminate this agreement with 60 days written notice.
+                  question: termination notice period
+              multiple_fields:
+                summary: Multiple fields
+                value:
+                  state: Either party may terminate this agreement with 60 days written notice.
+                  fields: [termination notice period, governing law]
+              from_document:
+                summary: From a document
+                value:
+                  question: termination notice period
+                  documents:
+                    - url: https://example.com/contract.pdf
+      responses:
+        "200":
+          description: Successful Response. `ExtractResult` for `question`, `ExtractFieldsResult` for `fields`.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ExtractResult"
+                  - $ref: "#/components/schemas/ExtractFieldsResult"
+              examples:
+                single_field:
+                  summary: Single Field (ExtractResult)
+                  value:
+                    type: extract
+                    field: termination notice period
+                    value: 60 days
+                    start: 47
+                    end: 54
+                    confidence: 0.94
+                    found: true
+                    grounded: true
+                    input_tokens: 24
+                    image_tokens: 0
+                    billable_tokens: 1000
+                multiple_fields:
+                  summary: Multiple Fields (ExtractFieldsResult)
+                  value:
+                    type: extract
+                    grounded: true
+                    values:
+                      termination notice period:
+                        type: extract
+                        field: termination notice period
+                        value: 60 days
+                        start: 47
+                        end: 54
+                        confidence: 0.94
+                        found: true
+                        grounded: true
+                      governing law:
+                        type: extract
+                        field: governing law
+                        value: null
+                        found: false
+                        grounded: true
+                    input_tokens: 48
+                    image_tokens: 0
+                    billable_tokens: 1000
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+        "500":
+          $ref: "#/components/responses/ServerError"
         "503":
           $ref: "#/components/responses/Overloaded"
 
@@ -538,15 +771,18 @@ paths:
 
   /ground:
     post:
-      tags: [Grounding]
+      tags: [Evidence]
       operationId: createGroundingDecision
-      summary: Visual grounding — locate objects in images
+      summary: Visual grounding — locate objects in images or video
       description: |
-        Open-vocabulary visual grounding. Finds objects matching `question` in the
+        Open-vocabulary visual grounding over images or video clips. Finds objects matching `question` in the
         provided image(s) and returns bounding boxes.
 
-        `value` is an array of `{label, box: [x1, y1, x2, y2]}` where coordinates
-        are normalized to `[0, 1000]`. Returns an empty array when nothing is found.
+        - **Images (`images`)** — finds regions matching `question` and returns
+          `{label, box: [x1, y1, x2, y2]}` normalized to `[0, 1000]`.
+        - **Video (`video`)** — scans a clip for objects (`kind: "object"`, returning
+          `start`, `end`, `peak_t`, and peak-frame `boxes`) or events (`kind: "event"`,
+          returning `onset_t` timestamps).
       requestBody:
         required: true
         content:
@@ -554,97 +790,80 @@ paths:
             schema:
               $ref: "#/components/schemas/GroundRequest"
             examples:
-              by_url:
+              image_by_url:
                 summary: Image by URL
                 value:
                   question: the invoice total
                   images:
                     - url: https://example.com/invoice.png
-              by_base64:
+              image_by_base64:
                 summary: Image by base64
                 value:
                   question: the red square
                   images:
                     - b64: "<base64-encoded PNG bytes>"
                       mime: image/png
+              video_scan:
+                summary: Video object scan
+                value:
+                  question: delivery truck
+                  kind: object
+                  video:
+                    url: https://example.com/clip.mp4
       responses:
         "200":
-          description: 'Grounding envelope with `type: "ground"`.'
+          description: 'Grounding envelope (`type: "ground"` for images, `type: "video_ground"` for video).'
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/GroundDecision"
-              example:
-                type: ground
-                value:
-                  - label: the red square
-                    box: [562, 250, 875, 562]
-                    score: 0.981
-                count: 1
-                found: true
-                grounded: true
+                anyOf:
+                  - $ref: "#/components/schemas/GroundDecision"
+                  - $ref: "#/components/schemas/VideoGroundDecision"
+              examples:
+                image_grounding:
+                  summary: Image grounding
+                  value:
+                    type: ground
+                    value:
+                      - label: the red square
+                        box: [197.0, 200.0, 812.0, 807.0]
+                    count: 1
+                    found: true
+                    grounded: true
+                    input_tokens: 286
+                    image_tokens: 256
+                    billable_tokens: 1000
+                video_grounding:
+                  summary: Video grounding
+                  value:
+                    type: video_ground
+                    kind: object
+                    duration_s: 10.0
+                    scanned: 12
+                    truncated: false
+                    hits:
+                      - start: 4.0
+                        end: 8.0
+                        peak_t: 6.0
+                        confidence: 0.98
+                        boxes:
+                          - label: delivery truck
+                            box: [120, 340, 610, 880]
+                    input_tokens: 884
+                    image_tokens: 768
+                    billable_tokens: 1000
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
         "422":
           $ref: "#/components/responses/Unprocessable"
+        "500":
+          $ref: "#/components/responses/ServerError"
         "503":
           $ref: "#/components/responses/Overloaded"
-
-  /ground/video:
-    post:
-      tags: [Grounding]
-      operationId: createVideoGroundingDecision
-      summary: Video grounding — locate objects or events in video
-      description: |
-        Scans a video clip for objects or events matching `query`.
-
-        - `kind: "object"` — returns temporal intervals where the object appears,
-          with optional per-frame bounding boxes (the spatio-temporal tube).
-        - `kind: "event"` — returns the onset timestamp of a happening.
-
-        Maximum clip size is 200 MB.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/VideoScanRequest"
-            example:
-              video:
-                url: https://example.com/clip.mp4
-              query: the red car
-              kind: object
-              coarse_step: 2.0
-              fine_resolution: 0.5
-      responses:
-        "200":
-          description: Video grounding result.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/VideoGroundDecision"
-              example:
-                type: video_ground
-                kind: object
-                duration_s: 10.0
-                hits:
-                  - start: 2.0
-                    end: 6.5
-                    peak_t: 4.0
-                    confidence: 0.95
-                    boxes:
-                      - label: the red car
-                        box: [200, 300, 600, 700]
-                        score: 0.95
-                input_tokens: 4800
-                image_tokens: 3840
-                billable_tokens: 4800
-        "400":
-          description: Invalid video reference, private URL, or undecodable clip.
-        "413":
-          description: Clip exceeds size limit (200 MB).
-        "422":
-          $ref: "#/components/responses/Unprocessable"
-        "503":
-          description: Video decoder unavailable, or server overloaded.
 
   # ── Data Science ───────────────────────────────────────────────
 
@@ -654,12 +873,11 @@ paths:
       operationId: createDataDecision
       summary: Decision from raw signals
       description: |
-        Makes a decision based on raw numeric signals. The server profiles the signal
-        data (statistics, distribution, anomalies) and folds the analysis into context
-        before deciding.
+        Analyzes raw numeric series (`signals`) and answers your `question` using the
+        candidate answers in `options`.
 
-        `kind` selects the decision type: `set` (default, multi-select), `choice`
-        (pick one), or `boolean` (yes/no). Candidates must be in `options`.
+        Use `kind` to choose the answer format: `set` (default, select all that apply),
+        `choice` (pick one), or `boolean` (yes/no).
       requestBody:
         required: true
         content:
@@ -681,9 +899,38 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/CategoricalDecision"
+                anyOf:
+                  - $ref: "#/components/schemas/SetDecision"
+                  - $ref: "#/components/schemas/CategoricalDecision"
+              example:
+                type: choice
+                value: linear regression
+                probability: 0.88
+                distribution:
+                  "spectral analysis (FFT)": 0.12
+                  linear regression: 0.88
+                status: answered
+                abstain_reason: null
+                mode: fast
+                think_allowed: false
+                thought: false
+                verification:
+                  performed: false
+                  result: not_applicable
+                evidence:
+                  spans: []
+                latency_ms: 140.0
+                model: dec-1
+                input_tokens: 224
+                billable_tokens: 1000
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
         "422":
           $ref: "#/components/responses/Unprocessable"
+        "500":
+          $ref: "#/components/responses/ServerError"
         "503":
           $ref: "#/components/responses/Overloaded"
 
@@ -768,8 +1015,14 @@ paths:
                   questions: 3
                   input_tokens: 1200
                   billable_tokens: 3000
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
         "422":
           $ref: "#/components/responses/Unprocessable"
+        "500":
+          $ref: "#/components/responses/ServerError"
         "503":
           $ref: "#/components/responses/Overloaded"
 
@@ -777,7 +1030,7 @@ paths:
 
   /capabilities:
     get:
-      tags: [Models]
+      tags: [Service]
       operationId: getCapabilities
       summary: Discover available decision types and modalities
       description: |
@@ -805,8 +1058,20 @@ paths:
                   audio:
                     available: true
                 evidence:
-                  spans: true
+                  text_spans: /span -> value:[{start,end,text}]
+                  available: true
+                extraction:
+                  endpoint: /extract
+                  available: true
+                  input: state/documents (document text) + question (one field) or fields:[...] (several)
+                  output: exact source value(s) + char offsets, copied from the document not generated (grounded)
+                  note: field extraction with no generation step.
                 abstention: true
+                openapi: /openapi.json
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/ServerError"
 
   /v1/models:
     get:
@@ -823,12 +1088,72 @@ paths:
                 $ref: "#/components/schemas/ModelList"
               example:
                 models:
-                  - name: dec-1
-                    description: Bivia foundation decision model.
+                  - name: bivia
+                    description: Bivia — foundation decision model (System-One compatible).
                     release_date: "2026-10-20"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /health:
+    get:
+      tags: [Service]
+      operationId: healthCheck
+      summary: Liveness
+      description: |
+        Returns `200 OK` while the service process is alive; `ready` reports whether warmup has completed and the
+        replica can serve decisions.
+      responses:
+        "200":
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+              example:
+                status: ok
+                ready: true
+                model: dec-1
+                capabilities:
+                  model: dec-1
+                  abstention: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /ready:
+    get:
+      tags: [Service]
+      operationId: readinessCheck
+      summary: Readiness
+      description: |
+        Kubernetes readiness probe. Returns `200 OK` when static-shape warmup is complete and the device is healthy,
+        or `503 Service Unavailable` otherwise.
+      responses:
+        "200":
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Readiness"
+              example:
+                ready: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/ServerError"
+        "503":
+          $ref: "#/components/responses/Overloaded"
 
 components:
   securitySchemes:
+    ApiKey:
+      type: apiKey
+      in: header
+      name: apikey
+      description: API key in the `apikey` header.
     bearerAuth:
       type: http
       scheme: bearer
@@ -857,6 +1182,33 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/Overloaded"
+    BadRequest:
+      description: The media could not be read (e.g. a video that does not decode).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorBody"
+          example:
+            detail: "could not decode video: no video stream"
+    Unauthorized:
+      description: Missing or invalid API key or access token.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorBody"
+          example:
+            message: Authentication required
+    PayloadTooLarge:
+      description: The request body, an image, a document or a video is over its size limit.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorBody"
+          example:
+            error: payload too large
+            limit_mb: 256
+    ServerError:
+      description: Unexpected server error. Retrying may succeed; report persistent errors with the request id.
 
   schemas:
     # ── Input types ────────────────────────────────────────────
@@ -1039,7 +1391,7 @@ components:
               minItems: 2
               maxItems: 26
               items:
-                x-stainless-any: true
+                type: string
               description: The options to choose from (2–26 items).
 
     DecideRequest:
@@ -1053,7 +1405,7 @@ components:
               minItems: 2
               maxItems: 26
               items:
-                x-stainless-any: true
+                type: string
               description: |
                 Candidate outcomes (2–26 items). When omitted, the model infers
                 options from the question text.
@@ -1087,7 +1439,7 @@ components:
             options:
               type: array
               items:
-                x-stainless-any: true
+                type: string
               description: The options to select from (zero or more may be selected).
 
     SpanRequest:
@@ -1112,6 +1464,20 @@ components:
           description: What to locate in the text.
         domain:
           type: string
+        audio:
+          type: array
+          items:
+            $ref: "#/components/schemas/AudioRef"
+          description: 'Audio clips to decide over: each `{b64, mime}` or `{url}`. Only on deployments where /capabilities reports audio available.'
+        mode:
+          type: string
+          enum: [fast]
+          default: fast
+          description: '/span has a single path: only "fast" is accepted.'
+        think:
+          type: boolean
+          default: false
+          description: '/span never thinks: only false is accepted.'
 
     GroundRequest:
       type: object
@@ -1134,6 +1500,52 @@ components:
           default: ""
         domain:
           type: string
+        audio:
+          type: array
+          items:
+            $ref: "#/components/schemas/AudioRef"
+          description: 'Audio clips to decide over: each `{b64, mime}` or `{url}`. Only on deployments where /capabilities reports audio available.'
+        video:
+          $ref: "#/components/schemas/VideoRef"
+          description: 'A video clip instead of images: the response is a video scan (`VideoGroundResult`).'
+        mode:
+          type: string
+          enum: [fast, deep]
+          default: fast
+          description: 'Images: "fast" returns the single best match, "deep" every match.'
+        min_region_patches:
+          type: integer
+          minimum: 1
+          default: 1
+          description: 'Deep mode only: ignore regions smaller than this many patches (`>= 1`).'
+        kind:
+          type: string
+          enum: [object, event]
+          default: object
+          description: 'Video only: "object" or "event".'
+        coarse_step:
+          type: number
+          exclusiveMinimum: 0
+          default: 5.0
+          description: 'Video only: seconds between coarse presence probes.'
+        fine_resolution:
+          type: number
+          exclusiveMinimum: 0
+          default: 0.5
+          description: 'Video only: seconds; precision of the onset search.'
+        boxes_on_hits:
+          type: boolean
+          default: true
+          description: 'Video only: also return regions on each hit''s peak frame.'
+        max_probes:
+          type: integer
+          minimum: 1
+          default: 200
+          description: 'Video only: maximum frames to examine.'
+        allow_abstain:
+          type: boolean
+          default: true
+          description: 'Allow `status: "abstained"` (value null) when no candidate clears the confidence bar.'
 
     VideoScanRequest:
       type: object
@@ -1194,12 +1606,17 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/DocumentRef"
+        audio:
+          type: array
+          items:
+            $ref: "#/components/schemas/AudioRef"
+          description: 'Audio clips to decide over: each `{b64, mime}` or `{url}`. Only on deployments where /capabilities reports audio available.'
         question:
           type: string
         options:
           type: array
           items:
-            x-stainless-any: true
+            type: string
           description: Candidate answers. Required for useful `choice` or `set` results.
         kind:
           type: string
@@ -1244,6 +1661,10 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/SignalRef"
+        assets:
+          type: ["object", "null"]
+          additionalProperties: true
+          description: 'System-One assets map: `{ name: { type: "image" | "audio", format, data_base64 } }`.'
         questions:
           type: object
           additionalProperties:
@@ -1470,10 +1891,12 @@ components:
       properties:
         document:
           type: string
-          description: Filename or URL of the document.
+          description: |
+            Filename or URL of the document, or `(remaining)` for documents that were
+            never read because the context limit was already reached.
         status:
           type: string
-          enum: [included, truncated, skipped]
+          enum: [included, skipped]
         chars:
           type: integer
           description: Number of characters extracted.
@@ -1481,9 +1904,12 @@ components:
           type: integer
         truncated:
           type: boolean
+          description: |
+            Present and `true` on an `included` document whose text was cut to fit the
+            context limit (about 48,000 characters).
         reason:
           type: string
-          description: Why the document was truncated or skipped.
+          description: Why the document was skipped.
 
     EnvelopeBase:
       type: object
@@ -1501,7 +1927,7 @@ components:
           verification,
           evidence,
           latency_ms,
-          model,
+          model
         ]
       properties:
         type:
@@ -1530,18 +1956,16 @@ components:
             - `unresolved_after_thinking` — reasoning did not resolve ambiguity.
         mode:
           type: string
-          enum: [fast, deep]
+          enum: [fast, deep, audio]
+          description: |
+            The mode that ran. `audio` is reported when an audio clip was decided
+            directly; it cannot be sent as a request `mode`.
         think_allowed:
           type: boolean
           description: Whether thinking was allowed for this call. Only present in fast mode.
         thought:
           type: boolean
           description: Whether a reasoning trace was actually generated.
-        grounded:
-          type: boolean
-          description: |
-            `true` when the answer is grounded in the provided context (a direct readout).
-            `false` when the answer is free-form generation.
         verification:
           $ref: "#/components/schemas/Verification"
         evidence:
@@ -1573,6 +1997,50 @@ components:
             $ref: "#/components/schemas/DocumentNote"
           description: Per-document extraction status. Present when documents were sent.
 
+    BooleanDecision:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            type:
+              type: string
+              enum: [boolean]
+            value:
+              type: ["string", "null"]
+              enum: ["yes", "no", null]
+              description: The answer. Null when abstained.
+            probability:
+              type: number
+              description: Probability of `value`. Omitted when the model abstains.
+            distribution:
+              type: object
+              properties:
+                "yes":
+                  type: number
+                "no":
+                  type: number
+              description: Probability of `yes` and of `no`, summing to 1. Present even on abstention.
+
+    ChoiceDecision:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            type:
+              type: string
+              enum: [choice]
+            value:
+              type: ["string", "null"]
+              description: The chosen option, one of the request `choices`. Null when abstained.
+            probability:
+              type: number
+              description: Probability of `value`. Omitted when the model abstains.
+            distribution:
+              type: object
+              additionalProperties:
+                type: number
+              description: Probability of each choice, summing to 1. Present even on abstention.
+
     CategoricalDecision:
       allOf:
         - $ref: "#/components/schemas/EnvelopeBase"
@@ -1591,6 +2059,10 @@ components:
               description: |
                 Probability of each label, summing to 1. Present even on abstention.
                 For boolean decisions, keys are `yes` and `no`.
+            read_as:
+              type: ["object", "null"]
+              additionalProperties: true
+              description: 'Present on `/decide` when `outcomes` is omitted: reports how Bivia auto-framed the question (`read_as`, `question`, `choices`, `range`).'
 
     ScoreDecision:
       allOf:
@@ -1661,10 +2133,7 @@ components:
 
     GroundDecision:
       type: object
-      required: [type, value, count, found, grounded]
-      description: |
-        Grounding response. Unlike other decision types, this does not include
-        the full decision envelope (no status, mode, verification, evidence, etc.).
+      required: [type, value, count, found, grounded, input_tokens, image_tokens, billable_tokens]
       properties:
         type:
           type: string
@@ -1676,13 +2145,26 @@ components:
           description: Detected regions. Empty array when nothing found.
         count:
           type: integer
-          description: Number of regions found.
+          description: Number of matched bounding box regions.
         found:
           type: boolean
-          description: Whether any regions were detected.
+          description: True when at least one region matched (`count > 0`).
         grounded:
           type: boolean
           description: Always `true` for grounding responses.
+        read_as:
+          type: ["object", "null"]
+          additionalProperties: true
+          description: Present when `/decide` auto-framed the question as grounding.
+        input_tokens:
+          type: integer
+          description: Total tokens processed (text + images + documents + audio).
+        image_tokens:
+          type: integer
+          description: Image-specific subset of `input_tokens`.
+        billable_tokens:
+          type: integer
+          description: Billing token count = `max(1000, input_tokens)`.
 
     VideoGroundDecision:
       type: object
@@ -1757,6 +2239,13 @@ components:
         abstention:
           type: boolean
           description: Whether abstention is enabled.
+        extraction:
+          type: object
+          additionalProperties: true
+          description: Grounded field extraction capability metadata (`/extract`).
+        openapi:
+          type: string
+          description: Path to the OpenAPI JSON specification.
 
     ModelList:
       type: object
@@ -1766,10 +2255,12 @@ components:
           type: array
           items:
             type: object
-            required: [name]
+            description: A model this API serves.
+            required: [name, description, release_date]
             properties:
               name:
                 type: string
+                description: What clients pass as `model`.
               description:
                 type: string
               release_date:
@@ -1816,3 +2307,209 @@ components:
           enum: [overloaded]
         detail:
           type: string
+
+    ValidationIssue:
+      type: object
+      description: One problem with the request body's shape.
+      required: [type, loc, msg]
+      properties:
+        type:
+          type: string
+          description: Kind of problem, e.g. "missing" or "string_type".
+        loc:
+          type: array
+          items:
+            type: ["string", "integer"]
+          description: Where it is, e.g. `["body", "question"]`.
+        msg:
+          type: string
+          description: What is wrong.
+        input:
+          description: The value that was sent.
+          default: null
+
+    ErrorBody:
+      type: object
+      description: |
+        Error response body. Which fields are present depends on where the request was rejected:
+
+        - **Bivia** (the request is well-formed but cannot be served): `error` and `detail`, e.g.
+          `{"error": "invalid_request", "detail": "score needs at least two buckets"}`.
+        - **Request validation** (a required field is missing or has the wrong type): `detail` is a list of issues.
+        - **Gateway** (authentication): `message`, e.g. `{"message": "Authentication required"}`.
+        - **Size limit:** `error` is `"payload too large"` and `limit_mb` gives the limit, or `detail` names the media
+          that is too large.
+      properties:
+        error:
+          type: ["string", "null"]
+          default: null
+          description: 'Machine-readable code: "invalid_request", "overloaded" or "payload too large".'
+        detail:
+          type: ["string", "array", "null"]
+          default: null
+          items:
+            $ref: "#/components/schemas/ValidationIssue"
+          description: What was wrong.
+        message:
+          type: ["string", "null"]
+          default: null
+          description: Gateway error message (authentication).
+        limit_mb:
+          type: ["integer", "null"]
+          default: null
+          description: Request size limit in MB (413 on the whole body).
+
+    ExtractRequest:
+      type: object
+      description: Copy the exact value of one field (`question`) or several (`fields`) from a document, with character offsets.
+      properties:
+        state:
+          type: string
+          default: ""
+          description: The document text. Documents add to it.
+        documents:
+          type: ["array", "null"]
+          items:
+            $ref: "#/components/schemas/DocumentRef"
+          description: |
+            Files whose text is added to the state as context (pdf, docx, pptx, xlsx, txt, md, csv, json, html,
+            source code), each `{b64 | url, filename?, mime?}`. Per-file status comes back in `document_notes`.
+        question:
+          type: ["string", "null"]
+          description: One field to extract, e.g. "termination notice period".
+        fields:
+          type: ["array", "null"]
+          items:
+            type: string
+          description: Several fields at once; the response maps each to its value.
+      examples:
+        - state: Either party may terminate this agreement with 60 days written notice.
+          question: termination notice period
+        - state: Either party may terminate this agreement with 60 days written notice.
+          fields:
+            - termination notice period
+            - governing law
+
+    ExtractValue:
+      type: object
+      description: 'One extracted field: the exact substring copied from the document, or `found: false`.'
+      required: [type, field, value, found, grounded]
+      properties:
+        type:
+          type: string
+          const: extract
+          description: The result type.
+        field:
+          type: string
+          description: The field that was asked for.
+        value:
+          type: ["string", "null"]
+          description: The exact source text for the field; null when not found.
+        start:
+          type: integer
+          description: Character offset where the value starts. Present when found.
+        end:
+          type: integer
+          description: Character offset where the value ends. Present when found.
+        confidence:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: Mean confidence over the selected text. Present when found.
+        found:
+          type: boolean
+          description: Whether the document contains a value for the field.
+        grounded:
+          type: boolean
+          const: true
+          description: 'Always true: the value is copied from the document, not generated.'
+        truncated:
+          type: boolean
+          description: Whether the input text was truncated before extraction.
+
+    ExtractResult:
+      description: Result of a single-field extraction (`question`).
+      allOf:
+        - $ref: "#/components/schemas/ExtractValue"
+        - type: object
+          properties:
+            input_tokens:
+              type: integer
+              description: 'Tokens processed for this request: text, attached documents and images.'
+            image_tokens:
+              type: integer
+              description: Image-tile part of `input_tokens`.
+            document_tokens:
+              type: ["integer", "null"]
+              description: Document part of `input_tokens`; present when documents were sent.
+            document_notes:
+              type: ["array", "null"]
+              items:
+                $ref: "#/components/schemas/DocumentNote"
+              description: Per-document status; present when documents were sent.
+            billable_tokens:
+              type: integer
+              description: 'Tokens billed for this request: `max(1000, input_tokens)`.'
+
+    ExtractFieldsResult:
+      type: object
+      description: 'Result of a multi-field extraction (`fields`): each field name maps to its value.'
+      required: [type, values, grounded]
+      properties:
+        type:
+          type: string
+          const: extract
+          description: The result type.
+        values:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/ExtractValue"
+          description: One entry per requested field.
+        grounded:
+          type: boolean
+          const: true
+          description: 'Always true: values are copied from the document.'
+        input_tokens:
+          type: integer
+          description: 'Tokens processed for this request: text, attached documents and images.'
+        image_tokens:
+          type: integer
+          description: Image-tile part of `input_tokens`.
+        document_tokens:
+          type: ["integer", "null"]
+          description: Document part of `input_tokens`; present when documents were sent.
+        document_notes:
+          type: ["array", "null"]
+          items:
+            $ref: "#/components/schemas/DocumentNote"
+          description: Per-document status; present when documents were sent.
+        billable_tokens:
+          type: integer
+          description: 'Tokens billed for this request: `max(1000, input_tokens)`.'
+
+    Health:
+      type: object
+      description: Response of `GET /health`.
+      required: [status, ready, model, capabilities]
+      properties:
+        status:
+          type: string
+          const: ok
+        ready:
+          type: boolean
+          description: Whether the service can serve decisions.
+        model:
+          type: string
+          description: Model version.
+        capabilities:
+          type: object
+          additionalProperties: true
+          description: Same content as `GET /capabilities`.
+
+    Readiness:
+      type: object
+      description: Response of `GET /ready`.
+      required: [ready]
+      properties:
+        ready:
+          type: boolean
