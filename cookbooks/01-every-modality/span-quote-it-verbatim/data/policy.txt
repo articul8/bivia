@@ -1,0 +1,17 @@
+SAMPLE AUTO POLICY (written for this demo; not a real policy)
+
+1. Coverage. This policy covers the insured vehicle against collision, theft, fire and broken glass while the vehicle is in the United States or Canada.
+
+2. Policy period. Coverage starts on the effective date shown in the schedule and ends at 12:01 a.m. on the expiry date, unless cancelled earlier under clause 8.
+
+3. Deductibles. The deductible for collision is $500. The deductible for theft is $1,000. Glass claims carry no deductible.
+
+4. Exclusions. We do not pay for damage caused by flood, surface water or rising water, by war, by wear and tear, or while the vehicle is used for ride-hire or delivery work.
+
+5. Territory. Claims for loss occurring outside the United States and Canada are not covered unless we agree in writing before travel.
+
+6. Reporting a claim. You must report any loss to us within 30 days of the date it occurred. Theft must also be reported to the police within 48 hours.
+
+7. Personal items. Personal belongings left inside the vehicle are covered up to a maximum of $500 per claim, and only if the loss follows a theft of the vehicle itself.
+
+8. Cancellation. You may cancel at any time by written notice. We may cancel for non-payment by giving 15 days' notice.
