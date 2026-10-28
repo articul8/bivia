@@ -1,8 +1,15 @@
 # Bivia
 
-Bivia is a **calibrated decision engine** by [Articul8 AI](https://articul8.ai). Ask a question with context — text, images, audio, documents, or signals — and get back a **typed, structured answer** with a probability distribution and honest abstention when the model isn't confident enough.
+<p>
+  <a href="https://app.articul8.ai/registration?source=bivia&code=bivia"><img alt="Get an API key" src="https://img.shields.io/badge/Get_an_API_key-0A66C2?style=for-the-badge"></a>
+  <a href="https://api-docs.app.articul8.ai/bivia"><img alt="Read the docs" src="https://img.shields.io/badge/Read_the_docs-2EA44F?style=for-the-badge"></a>
+</p>
 
-No free-form text. No hallucination. Just decisions you can act on.
+Bivia is a **calibrated decision engine** by [Articul8 AI](https://articul8.ai/?utm_source=github&utm_medium=readme&utm_campaign=bivia&utm_content=intro). Ask a question with context — text, images, audio, documents, or signals — and get back a **typed, structured answer** with a probability distribution and honest abstention when the model isn't confident enough.
+
+No free-form text. No guessing. Just decisions you can act on.
+
+**[Get your API key →](https://app.articul8.ai/registration?source=bivia&code=bivia)** &nbsp;·&nbsp; **[Read the docs →](https://api-docs.app.articul8.ai/bivia)**
 
 ## What makes Bivia different
 
@@ -13,6 +20,9 @@ No free-form text. No hallucination. Just decisions you can act on.
 - **Evidence** — every answer traces back to the input with character offsets or bounding boxes.
 
 ## Quick start
+
+1. **[Sign up and get an API key](https://app.articul8.ai/registration?source=bivia&code=bivia).**
+2. Make your first decision:
 
 ```bash
 export A8_API_KEY="your-key"
@@ -36,6 +46,8 @@ curl -s https://api.articul8.ai/bivia/boolean \
   "model": "dec-1"
 }
 ```
+
+**Next:** browse every endpoint, parameter, and response in the **[API docs](https://api-docs.app.articul8.ai/bivia)**, or run the ready-made scripts in [`examples/curl`](examples/curl).
 
 ## SDKs
 
@@ -88,7 +100,7 @@ fmt.Println(result.Value, result.Probability)  // "yes" 0.92
 
 ## Decision types
 
-| Endpoint | Returns |
+| Endpoint | What it returns |
 |---|---|
 | `POST /boolean` | `yes` or `no` with P(value) |
 | `POST /choice` | One label from your list, with distribution |
@@ -96,8 +108,12 @@ fmt.Println(result.Value, result.Probability)  // "yes" 0.92
 | `POST /score` | A number on your scale, with per-level mass |
 | `POST /set` | Zero or more labels (multi-select) |
 | `POST /span` | Character offsets into the input text |
-| `POST /ground` | Bounding boxes in images |
-| `POST /ground/video` | Object/event intervals in video |
+| `POST /extract` | Exact field values copied from document text, with offsets |
+| `POST /ground` | Bounding boxes in an image or temporal intervals in a video |
+| `POST /ds` | Decision over profiled numeric signals |
+| `POST /v1/systemone` | Multiple named typed answers in a single batch call |
+
+Request and response schemas for each endpoint are in the **[API docs](https://api-docs.app.articul8.ai/bivia)**.
 
 ## Abstention
 
@@ -131,15 +147,22 @@ result = client.decisions.choice(
 )
 ```
 
-## API Reference
+## Documentation
 
-Full API documentation: [docs.articul8.ai/bivia](https://docs.articul8.ai/bivia)
+**[api-docs.app.articul8.ai/bivia](https://api-docs.app.articul8.ai/bivia)** — the full Bivia API reference.
 
-OpenAPI spec: [`openapi.yaml`](https://github.com/articul8/bivia-api/blob/main/openapi.yaml)
+- OpenAPI spec: [`openapi.yaml`](openapi.yaml)
+- curl examples for every endpoint: [`examples/curl`](examples/curl)
 
 ## Model
 
 The current model is **`dec-1`** (Bivia foundation decision model). Discover available models via `GET /v1/models`.
+
+## Get started
+
+Ready to build? **[Sign up](https://app.articul8.ai/registration?source=bivia&code=bivia)** to get your API key, or read the [docs](https://api-docs.app.articul8.ai/bivia).
+
+Questions? Email [support@articul8.ai](mailto:support@articul8.ai).
 
 ## License
 
